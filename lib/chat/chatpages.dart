@@ -16,46 +16,79 @@ class _ChatpagesState extends State<Chatpages> {
   late WebSocketChannel channel;
   final ImagePicker picker = ImagePicker();
   final List<Map<String, dynamic>> messages = [];
-  bool _isGeminiThinking = false;
+  bool _isThinking = false;
 
   @override
   void initState() {
     super.initState();
     channel = WebSocketChannel.connect(Uri.parse("ws://192.168.1.10:8080"));
 
-    channel.stream.listen((message) {
-      final decoded = jsonDecode(message);
-      setState(() {
-        messages.add({
-          "sender": "server",
-          "type": decoded["type"],
-          "data": decoded["data"],
+    channel.stream.listen(
+      (message) {
+        final decoded = jsonDecode(message);
+        setState(() {
+          messages.add({
+            "sender": "server",
+            "type": decoded["type"],
+            "data": decoded["data"],
+          });
         });
-      });
-    });
+      },
+      onError: (error) {
+        setState(() {
+          messages.add({
+            "sender": "system",
+            "type": "text",
+            "data": "WebSocket xatosi: $error",
+          });
+        });
+      },
+      onDone: () {
+        setState(() {
+          messages.add({
+            "sender": "system",
+            "type": "text",
+            "data": "WebSocket ulanishi yopildi",
+          });
+        });
+      },
+    );
   }
 
-  void _sent_messages() async {
+  Future<void> _sendMessage() async {
     final String text = _controller.text.trim();
     if (text.isEmpty) return;
 
     setState(() {
       messages.add({"sender": "user", "type": "text", "data": text});
-      _isGeminiThinking = true;
+      _isThinking = true;
     });
     _controller.clear();
 
     try {
       channel.sink.add(jsonEncode({"type": "text", "data": text}));
       final gemini = Gemini.instance;
-      final response = await gemini.chat([
-        Content(
-          role: "user",
-          parts: [Parts(text: text)],
-        ),
-      ]);
 
-      String geminiResponseText = response?.output ?? "Javob yo'q";
+      String? geminiResponseText;
+      for (int attempt = 0; attempt < 3; attempt++) {
+        try {
+          final response = await gemini.text(text);
+          geminiResponseText = response?.output ?? "Javob yo'q";
+          break;
+        } catch (e) {
+          if (e.toString().contains("429")) {
+            // Wait before retrying (exponential backoff)
+            await Future.delayed(Duration(seconds: 1 << attempt));
+            if (attempt == 2) {
+              throw Exception(
+                "API so'rovlar soni chegarasi: Iltimos, keyinroq qayta urinib ko'ring",
+              );
+            }
+          } else {
+            throw e;
+          }
+        }
+      }
 
       setState(() {
         messages.add({
@@ -63,18 +96,18 @@ class _ChatpagesState extends State<Chatpages> {
           "type": "text",
           "data": geminiResponseText,
         });
-        _isGeminiThinking = false;
+        _isThinking = false;
       });
     } catch (e) {
       setState(() {
         messages.add({
           "sender": "gemini",
           "type": "text",
-          "data": "Gemini aloqada xato: $e",
+          "data": "Xatolik: $e",
         });
-        _isGeminiThinking = false;
+        _isThinking = false;
       });
-      print("Gemini xatosi: $e");
+      print("Xatolik: $e");
     }
   }
 
@@ -85,7 +118,7 @@ class _ChatpagesState extends State<Chatpages> {
     super.dispose();
   }
 
-  void imagepickerchoose() {
+  void _showImagePicker() {
     showModalBottomSheet(
       context: context,
       builder: (BuildContext context) {
@@ -93,16 +126,16 @@ class _ChatpagesState extends State<Chatpages> {
           mainAxisSize: MainAxisSize.min,
           children: [
             ListTile(
-              leading: Icon(Icons.camera_alt),
-              title: Text("Camera"),
+              leading: const Icon(Icons.camera_alt),
+              title: const Text("Kamera"),
               onTap: () {
                 Navigator.pop(context);
                 _pickImage(ImageSource.camera);
               },
             ),
             ListTile(
-              leading: Icon(Icons.image_rounded),
-              title: Text("Galareya"),
+              leading: const Icon(Icons.image_rounded),
+              title: const Text("Galereya"),
               onTap: () {
                 Navigator.pop(context);
                 _pickImage(ImageSource.gallery);
@@ -120,24 +153,39 @@ class _ChatpagesState extends State<Chatpages> {
       final bytes = await pickedFile.readAsBytes();
       final base64Image = base64Encode(bytes);
 
-      channel.sink.add(jsonEncode({"type": "image", "data": base64Image}));
       setState(() {
         messages.add({"sender": "user", "type": "image", "data": base64Image});
       });
+
+      try {
+        channel.sink.add(jsonEncode({"type": "image", "data": base64Image}));
+      } catch (e) {
+        setState(() {
+          messages.add({
+            "sender": "system",
+            "type": "text",
+            "data": "Rasm yuborishda xatolik: $e",
+          });
+        });
+        print("Rasm yuborishda xatolik: $e");
+      }
     }
   }
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: Text("Chat"), backgroundColor: Colors.blueGrey),
+      appBar: AppBar(
+        title: const Text("Chat"),
+        backgroundColor: Colors.blueGrey,
+      ),
       body: Column(
         children: [
           Expanded(
             child: ListView.builder(
-              itemCount: messages.length + (_isGeminiThinking ? 1 : 0),
+              itemCount: messages.length + (_isThinking ? 1 : 0),
               itemBuilder: (BuildContext context, int index) {
-                if (index == messages.length && _isGeminiThinking) {
+                if (index == messages.length && _isThinking) {
                   return const Center(child: CircularProgressIndicator());
                 }
 
@@ -177,7 +225,7 @@ class _ChatpagesState extends State<Chatpages> {
                         vertical: 4.0,
                         horizontal: 8.0,
                       ),
-                      padding: const EdgeInsets.all(4.0),
+                      padding: EdgeInsets.all(4.0),
                       decoration: BoxDecoration(
                         color: isUser
                             ? Colors.blueAccent[100]
@@ -192,13 +240,12 @@ class _ChatpagesState extends State<Chatpages> {
                       ),
                     ),
                   );
-                } else {
-                  return const SizedBox.shrink();
                 }
+                return const SizedBox.shrink();
               },
             ),
           ),
-          if (_isGeminiThinking)
+          if (_isThinking)
             const Padding(
               padding: EdgeInsets.all(8.0),
               child: LinearProgressIndicator(),
@@ -211,23 +258,29 @@ class _ChatpagesState extends State<Chatpages> {
             ),
             child: Row(
               children: [
-                IconButton(onPressed: imagepickerchoose, icon: Icon(Icons.add)),
+                IconButton(
+                  onPressed: _showImagePicker,
+                  icon: const Icon(Icons.add),
+                ),
                 Expanded(
                   child: TextField(
                     controller: _controller,
                     decoration: InputDecoration(
-                      hintText: "Enter something..",
+                      hintText: "Xabar yozing...",
                       border: OutlineInputBorder(
                         borderRadius: BorderRadius.circular(20),
                       ),
-                      contentPadding: EdgeInsets.symmetric(
+                      contentPadding: const EdgeInsets.symmetric(
                         horizontal: 16,
                         vertical: 10,
                       ),
                     ),
                   ),
                 ),
-                IconButton(onPressed: _sent_messages, icon: Icon(Icons.send)),
+                IconButton(
+                  onPressed: _sendMessage,
+                  icon: const Icon(Icons.send),
+                ),
               ],
             ),
           ),
