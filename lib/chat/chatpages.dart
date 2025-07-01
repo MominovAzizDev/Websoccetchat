@@ -1,8 +1,8 @@
 import 'dart:convert';
-
 import 'package:flutter/material.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:web_socket_channel/web_socket_channel.dart';
+import 'package:flutter_gemini/flutter_gemini.dart';
 
 class Chatpages extends StatefulWidget {
   const Chatpages({super.key});
@@ -16,6 +16,7 @@ class _ChatpagesState extends State<Chatpages> {
   late WebSocketChannel channel;
   final ImagePicker picker = ImagePicker();
   final List<Map<String, dynamic>> messages = [];
+  bool _isGeminiThinking = false;
 
   @override
   void initState() {
@@ -25,19 +26,55 @@ class _ChatpagesState extends State<Chatpages> {
     channel.stream.listen((message) {
       final decoded = jsonDecode(message);
       setState(() {
-        messages.add({"type": decoded["type"], "data": decoded["data"]});
+        messages.add({
+          "sender": "server",
+          "type": decoded["type"],
+          "data": decoded["data"],
+        });
       });
     });
   }
 
-  void _sent_messages() {
-    if (_controller.text.isNotEmpty) {
-      final String text = _controller.text;
+  void _sent_messages() async {
+    final String text = _controller.text.trim();
+    if (text.isEmpty) return;
+
+    setState(() {
+      messages.add({"sender": "user", "type": "text", "data": text});
+      _isGeminiThinking = true;
+    });
+    _controller.clear();
+
+    try {
       channel.sink.add(jsonEncode({"type": "text", "data": text}));
+      final gemini = Gemini.instance;
+      final response = await gemini.chat([
+        Content(
+          role: "user",
+          parts: [Parts(text: text)],
+        ),
+      ]);
+
+      String geminiResponseText = response?.output ?? "Javob yo'q";
+
       setState(() {
-        messages.add({"type": "text", "data": text});
+        messages.add({
+          "sender": "gemini",
+          "type": "text",
+          "data": geminiResponseText,
+        });
+        _isGeminiThinking = false;
       });
-      _controller.clear();
+    } catch (e) {
+      setState(() {
+        messages.add({
+          "sender": "gemini",
+          "type": "text",
+          "data": "Gemini aloqada xato: $e",
+        });
+        _isGeminiThinking = false;
+      });
+      print("Gemini xatosi: $e");
     }
   }
 
@@ -78,14 +115,14 @@ class _ChatpagesState extends State<Chatpages> {
   }
 
   Future<void> _pickImage(ImageSource source) async {
-    final PickedFile = await picker.pickImage(source: source, imageQuality: 50);
-    if (PickedFile != null) {
-      final bytes = await PickedFile.readAsBytes();
+    final pickedFile = await picker.pickImage(source: source, imageQuality: 50);
+    if (pickedFile != null) {
+      final bytes = await pickedFile.readAsBytes();
       final base64Image = base64Encode(bytes);
 
       channel.sink.add(jsonEncode({"type": "image", "data": base64Image}));
       setState(() {
-        messages.add({"type": "image", "data": base64Image});
+        messages.add({"sender": "user", "type": "image", "data": base64Image});
       });
     }
   }
@@ -93,35 +130,101 @@ class _ChatpagesState extends State<Chatpages> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
+      appBar: AppBar(title: Text("Chat"), backgroundColor: Colors.blueGrey),
       body: Column(
         children: [
           Expanded(
             child: ListView.builder(
-              itemCount: messages.length,
+              itemCount: messages.length + (_isGeminiThinking ? 1 : 0),
               itemBuilder: (BuildContext context, int index) {
+                if (index == messages.length && _isGeminiThinking) {
+                  return const Center(child: CircularProgressIndicator());
+                }
+
                 final msg = messages[index];
+                final isUser = msg["sender"] == "user";
+                final isGemini = msg["sender"] == "gemini";
+
                 if (msg["type"] == "text") {
-                  return ListTile(title: Text(msg["data"]));
+                  return Align(
+                    alignment: isUser
+                        ? Alignment.centerRight
+                        : Alignment.centerLeft,
+                    child: Container(
+                      margin: const EdgeInsets.symmetric(
+                        vertical: 4.0,
+                        horizontal: 8.0,
+                      ),
+                      padding: const EdgeInsets.all(10.0),
+                      decoration: BoxDecoration(
+                        color: isUser
+                            ? Colors.blueAccent[100]
+                            : (isGemini
+                                  ? Colors.greenAccent[100]
+                                  : Colors.grey[300]),
+                        borderRadius: BorderRadius.circular(12.0),
+                      ),
+                      child: Text(msg["data"]),
+                    ),
+                  );
                 } else if (msg["type"] == "image") {
-                  return Padding(
-                    padding: EdgeInsets.all(8.0),
-                    child: Image.memory(base64Decode(msg["data"])),
+                  return Align(
+                    alignment: isUser
+                        ? Alignment.centerRight
+                        : Alignment.centerLeft,
+                    child: Container(
+                      margin: const EdgeInsets.symmetric(
+                        vertical: 4.0,
+                        horizontal: 8.0,
+                      ),
+                      padding: const EdgeInsets.all(4.0),
+                      decoration: BoxDecoration(
+                        color: isUser
+                            ? Colors.blueAccent[100]
+                            : Colors.grey[300],
+                        borderRadius: BorderRadius.circular(12.0),
+                      ),
+                      child: Image.memory(
+                        base64Decode(msg["data"]),
+                        width: 150,
+                        height: 150,
+                        fit: BoxFit.cover,
+                      ),
+                    ),
                   );
                 } else {
-                  return SizedBox.shrink();
+                  return const SizedBox.shrink();
                 }
               },
             ),
           ),
+          if (_isGeminiThinking)
+            const Padding(
+              padding: EdgeInsets.all(8.0),
+              child: LinearProgressIndicator(),
+            ),
           Padding(
-            padding: EdgeInsets.only(left: 20, right: 20),
+            padding: EdgeInsets.only(
+              left: 20,
+              right: 20,
+              bottom: MediaQuery.of(context).padding.bottom + 8,
+            ),
             child: Row(
               children: [
-                IconButton(onPressed:imagepickerchoose, icon: Icon(Icons.add)),
+                IconButton(onPressed: imagepickerchoose, icon: Icon(Icons.add)),
                 Expanded(
                   child: TextField(
                     controller: _controller,
-                    decoration: InputDecoration(hintText: "Enter somthing.."),
+                    decoration: InputDecoration(
+                      hintText: "Enter something..",
+                      border: OutlineInputBorder(
+                        borderRadius: BorderRadius.circular(20),
+                      ),
+                      contentPadding: EdgeInsets.symmetric(
+                        horizontal: 16,
+                        vertical: 10,
+                      ),
+                    ),
                   ),
                 ),
                 IconButton(onPressed: _sent_messages, icon: Icon(Icons.send)),
