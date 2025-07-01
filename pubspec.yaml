@@ -10,6 +10,9 @@ dependencies:
   flutter:
     sdk: flutter
   http: ^1.4.0
+  image_picker: ^1.1.2
+  path: ^1.9.1
+  path_provider: ^2.1.5
   web_socket_channel: ^3.0.3
 
 dev_dependencies:
